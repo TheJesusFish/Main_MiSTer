@@ -6,6 +6,12 @@
 #define VFILTER_SCAN  2
 #define VFILTER_ILACE 3
 
+enum RotationMode {
+	ROTATION_NONE = 0,
+	ROTATION_CW = 1,   // 90°
+	ROTATION_CCW = 2   // 270°
+};
+
 struct VideoInfo
 {
 	uint32_t width;
@@ -27,7 +33,7 @@ struct VideoInfo
 	uint32_t de_v;
 
 	bool interlaced;
-	bool rotated;
+	uint8_t rotated;  // use RotationMode values
 };
 
 void  video_init();

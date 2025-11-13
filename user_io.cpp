@@ -4233,7 +4233,7 @@ bool user_io_screenshot(const char *pngname, int rescale)
     int scwidth = ms->output_width;
     int scheight = ms->output_height;
 
-    if (video_get_rotated())
+    if (video_get_rotated() != ROTATION_NONE)
     {
 
       //If the video is rotated, the scaled output resolution results in a squished image.
