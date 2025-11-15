@@ -1591,12 +1591,27 @@ static void spd_config_update()
 	bool rotation_cw = (rot_dir == 1);
 	bool rotation_ccw = (rot_dir == 2);
 
+	// Debug: print rotation info
+	if (rot_dir != 0 || vi->rotated)
+	{
+		printf("SPD rotation debug: is_arcade=%d, vi->rotated=%d, rot_dir=%d, CW=%d, CCW=%d\n",
+		       is_arcade(), vi->rotated, rot_dir, rotation_cw, rotation_ccw);
+	}
+
+	uint8_t spd_byte7 = (uint8_t)((vi->interlaced ? 1 : 0) | (menu_present() ? 4 : 0) | (rotation_cw ? 8 : 0) | (rotation_ccw ? 16 : 0));
+
+	if (rot_dir != 0 || vi->rotated)
+	{
+		printf("SPD byte 7 = 0x%02X (interlaced=%d, menu=%d, cw=%d, ccw=%d)\n",
+		       spd_byte7, vi->interlaced, menu_present(), rotation_cw, rotation_ccw);
+	}
+
 	uint8_t data[32] = {
 		0x83, 0x01, 25, 0,
 		cfg.direct_video ? 'D' : 'V',
 		cfg.direct_video ? 'V' : 'I',
 		cfg.direct_video ? '1' : '1', // version
-		(uint8_t)((vi->interlaced ? 1 : 0) | (menu_present() ? 4 : 0) | (rotation_cw ? 8 : 0) | (rotation_ccw ? 16 : 0)),
+		spd_byte7,
 		(uint8_t)(vi->pixrep ? vi->pixrep : (vi->ctime / vi->width)),
 		(uint8_t)vi->de_h,
 		(uint8_t)(vi->de_h >> 8),
