@@ -28,6 +28,7 @@
 #include "offload.h"
 
 #include "support.h"
+#include "support/arcade/mra_loader.h"
 #include "lib/imlib2/Imlib2.h"
 #include "lib/md5/md5.h"
 
@@ -1573,15 +1574,29 @@ static void spd_config_update()
 	if (!vi->width)
 		return;
 
+	// Get rotation direction from arcade MRA if available
+	// For arcade: use MRA rotation direction
+	// For non-arcade: use FPGA rotation flag (if set, assume CW)
+	int rot_dir = 0;  // 0=none, 1=CW, 2=CCW
+	if (is_arcade())
+	{
+		rot_dir = arcade_get_rotation_dir();
+	}
+	else if (vi->rotated)
+	{
+		rot_dir = 1;  // Non-arcade cores: assume CW if rotated
+	}
+
+	// SPD byte 7: bit 0=interlaced, bit 2=menu, bit 3=rotate_CW, bit 4=rotate_CCW
+	bool rotation_cw = (rot_dir == 1);
+	bool rotation_ccw = (rot_dir == 2);
+
 	uint8_t data[32] = {
 		0x83, 0x01, 25, 0,
 		cfg.direct_video ? 'D' : 'V',
 		cfg.direct_video ? 'V' : 'I',
 		cfg.direct_video ? '1' : '1', // version
-		(uint8_t)((vi->interlaced ? 1 : 0)
-		         | (menu_present() ? 4 : 0)
-		         | (vi->rotated == ROTATION_CW  ? 0x08 : 0)
-		         | (vi->rotated == ROTATION_CCW ? 0x10 : 0)),
+		(uint8_t)((vi->interlaced ? 1 : 0) | (menu_present() ? 4 : 0) | (rotation_cw ? 8 : 0) | (rotation_ccw ? 16 : 0)),
 		(uint8_t)(vi->pixrep ? vi->pixrep : (vi->ctime / vi->width)),
 		(uint8_t)vi->de_h,
 		(uint8_t)(vi->de_h >> 8),
@@ -2731,13 +2746,7 @@ static bool get_video_info(bool force, VideoInfo *video_info)
 		video_info->de_h = spi_w(0);
 		video_info->de_v = spi_w(0);
 		video_info->interlaced = ( res & 0x100 ) != 0;
-		// Decode rotation: bit 9 = CW/90°, bit 10 = CCW/270°
-		if (res & 0x400)
-			video_info->rotated = ROTATION_CCW;
-		else if (res & 0x200)
-			video_info->rotated = ROTATION_CW;
-		else
-			video_info->rotated = ROTATION_NONE;
+		video_info->rotated = ( res & 0x200 ) != 0;
 	}
 	else
 	{
@@ -2855,8 +2864,8 @@ static void video_resolution_adjust(const VideoInfo *vi, vmode_custom_t *vm)
 
 	int w = vm->param.pr ? vm->param.hact * 2 : vm->param.hact;
 	int h = vm->param.vact;
-	const uint32_t core_height = vi->fb_en ? vi->fb_height : (vi->rotated != ROTATION_NONE) ? vi->width : vi->height;
-	const uint32_t core_width = vi->fb_en ? vi->fb_width : (vi->rotated != ROTATION_NONE) ? vi->height : vi->width;
+	const uint32_t core_height = vi->fb_en ? vi->fb_height : vi->rotated ? vi->width : vi->height;
+	const uint32_t core_width = vi->fb_en ? vi->fb_width : vi->rotated ? vi->height : vi->width;
 
 	if (w == 0 || h == 0 || core_height == 0 || core_width == 0)
 	{
@@ -2927,7 +2936,7 @@ static void video_scaling_adjust(const VideoInfo *vi, const vmode_custom_t *vm)
 		return;
 	}
 
-	const uint32_t height = (vi->rotated != ROTATION_NONE) ? vi->width : vi->height;
+	const uint32_t height = vi->rotated ? vi->width : vi->height;
 
 	uint32_t scrh = vm->item[5];
 	if (scrh)
