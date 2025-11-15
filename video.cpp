@@ -1574,6 +1574,10 @@ static void spd_config_update()
 	if (!vi->width)
 		return;
 
+	static int call_count = 0;
+	if (call_count++ % 60 == 0)  // Print every 60 calls to avoid spam
+		printf("SPD config update called (count=%d)\n", call_count);
+
 	// Get rotation direction from arcade MRA if available
 	// For arcade: use MRA rotation direction
 	// For non-arcade: use FPGA rotation flag (if set, assume CW)
@@ -1591,19 +1595,29 @@ static void spd_config_update()
 	bool rotation_cw = (rot_dir == 1);
 	bool rotation_ccw = (rot_dir == 2);
 
-	// Debug: print rotation info
+	// Debug: write rotation info to file
 	if (rot_dir != 0 || vi->rotated)
 	{
-		printf("SPD rotation debug: is_arcade=%d, vi->rotated=%d, rot_dir=%d, CW=%d, CCW=%d\n",
-		       is_arcade(), vi->rotated, rot_dir, rotation_cw, rotation_ccw);
+		FILE *f = fopen("/tmp/spd_debug.txt", "a");
+		if (f)
+		{
+			fprintf(f, "SPD rotation debug: is_arcade=%d, vi->rotated=%d, rot_dir=%d, CW=%d, CCW=%d\n",
+			        is_arcade(), vi->rotated, rot_dir, rotation_cw, rotation_ccw);
+			fclose(f);
+		}
 	}
 
 	uint8_t spd_byte7 = (uint8_t)((vi->interlaced ? 1 : 0) | (menu_present() ? 4 : 0) | (rotation_cw ? 8 : 0) | (rotation_ccw ? 16 : 0));
 
 	if (rot_dir != 0 || vi->rotated)
 	{
-		printf("SPD byte 7 = 0x%02X (interlaced=%d, menu=%d, cw=%d, ccw=%d)\n",
-		       spd_byte7, vi->interlaced, menu_present(), rotation_cw, rotation_ccw);
+		FILE *f = fopen("/tmp/spd_debug.txt", "a");
+		if (f)
+		{
+			fprintf(f, "SPD byte 7 = 0x%02X (interlaced=%d, menu=%d, cw=%d, ccw=%d)\n",
+			        spd_byte7, vi->interlaced, menu_present(), rotation_cw, rotation_ccw);
+			fclose(f);
+		}
 	}
 
 	uint8_t data[32] = {
