@@ -1058,6 +1058,8 @@ static int xml_read_pre_parse(XMLEvent evt, const XMLNode* node, SXML_CHAR* text
 		foundsetname = false;
 		foundrotation = false;
 		samedir = 0;
+		is_vertical = false;
+		rotation_dir = 0;
 		break;
 
 	case XML_EVENT_START_NODE:
