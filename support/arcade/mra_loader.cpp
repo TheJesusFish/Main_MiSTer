@@ -1091,6 +1091,7 @@ static int xml_read_pre_parse(XMLEvent evt, const XMLNode* node, SXML_CHAR* text
 			is_vertical = strncasecmp(text, "vertical", 8) == 0;
 			
 			rotation_dir = 0;
+			printf("MRA DEBUG: inrotation=true, text='%s', is_vertical=%d\n", text, is_vertical);
 			if (is_vertical)
 			{
 				if (strcasestr(text, "cw") || strcasestr(text, "clockwise"))
@@ -1105,6 +1106,7 @@ static int xml_read_pre_parse(XMLEvent evt, const XMLNode* node, SXML_CHAR* text
 				{
 					rotation_dir = 1; // Fallback to CW if no direction is declared
 				}
+				printf("MRA DEBUG: Set rotation_dir=%d\n", rotation_dir);
 			}
 		}
 		break;

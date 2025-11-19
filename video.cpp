@@ -2963,6 +2963,10 @@ static void spd_config_update()
 
 	VideoInfo *vi = &current_video_info;
 	if (!vi->width) return;
+	int rot_dir = arcade_get_direction();
+	uint8_t byte7 = (uint8_t)((vi->interlaced ? 1 : 0) | (menu_present() ? 4 : 0) | (vi->rotated ? 8 : 0) | (rot_dir << 4));
+	printf("SPD DEBUG: rot_dir=%d, rotated=%d, direct_video=%d, byte7=0x%02X (%d)\n", 
+	       rot_dir, vi->rotated, cfg.direct_video, byte7, byte7);
 
 	uint8_t data[31] =
 	{
@@ -2970,7 +2974,7 @@ static void spd_config_update()
 		cfg.direct_video ? 'D' : 'V',
 		cfg.direct_video ? 'V' : 'I',
 		cfg.direct_video ? '1' : '1', // version
-		(uint8_t)((vi->interlaced ? 1 : 0) | (menu_present() ? 4 : 0) | (vi->rotated ? 8 : 0) | (cfg.direct_video ? (arcade_get_direction() << 4) : 0)),
+		byte7,
 		(uint8_t)(vi->pixrep ? vi->pixrep : (vi->ctime / vi->width)),
 		(uint8_t)vi->de_h,
 		(uint8_t)(vi->de_h >> 8),
