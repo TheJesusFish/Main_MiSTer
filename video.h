@@ -28,6 +28,7 @@ struct VideoInfo
 
 	bool interlaced;
 	bool rotated;
+	int rotation_dir;  // 0=none, 1=CW, 2=CCW
 };
 
 void  video_init();
