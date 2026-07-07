@@ -2432,6 +2432,19 @@ static int store_custom_video_mode(char* vcfg, vmode_custom_t *v)
 	return ret >= 0;
 }
 
+static void store_predefined_video_mode(uint mode, vmode_custom_t *v)
+{
+	memset(v, 0, sizeof(vmode_custom_t));
+	if (mode >= VMODES_NUM) mode = 0;
+	if (vmodes[mode].pr == 1 && !supports_pr()) mode = 8;
+	v->item[0] = mode;
+	for (int i = 0; i < 8; i++) v->item[i + 1] = vmodes[mode].vpar[i];
+	v->param.vic = vmodes[mode].vic_mode;
+	v->param.pr = vmodes[mode].pr;
+	v->param.rb = 1;
+	setPLL(vmodes[mode].Fpix, v);
+}
+
 static void fb_init()
 {
 	if (!fb_base)
@@ -2648,12 +2661,6 @@ static void video_mode_load(bool keep_direct_video_auto = false)
 		cfg.fx_direct = 0;
 	}
 
-	if (cfg.fx_direct && cfg.vsync_adjust)
-	{
-		printf("Disabling vsync_adjust because of enabled fx_direct.\n");
-		cfg.vsync_adjust = 0;
-	}
-
 	if (cfg.direct_video)
 	{
 		int mode = cfg.menu_pal ? 2 : 0;
@@ -2664,6 +2671,15 @@ static void video_mode_load(bool keep_direct_video_auto = false)
 		v_def.item[0] = mode;
 		for (int i = 0; i < 8; i++) v_def.item[i + 1] = tvmodes[mode].vpar[i];
 		setPLL(tvmodes[mode].Fpix, &v_def);
+
+		vmode_def = 1;
+		vmode_pal = 0;
+		vmode_ntsc = 0;
+	}
+	else if (cfg.fx_direct)
+	{
+		printf("FX-Direct: forcing HDMI video_mode to 8.\n");
+		store_predefined_video_mode(8, &v_def);
 
 		vmode_def = 1;
 		vmode_pal = 0;
@@ -3422,11 +3438,17 @@ static bool fx_direct_get_layout(const VideoInfo *vi, FxDirectLayout *layout)
 	const uint32_t margin_h = FX_DIRECT_WIDTH - scaled_w;
 	const uint32_t margin_v = FX_DIRECT_HEIGHT - scaled_h;
 	layout->left = margin_h / 2;
-	layout->right = margin_h - (margin_h / 2);
 	layout->top = margin_v / 2;
-	layout->bottom = margin_v - (margin_v / 2);
+	layout->right = layout->left + scaled_w;
+	layout->bottom = layout->top + scaled_h;
 	layout->prescale_h = prescale_h;
 	layout->prescale_v = prescale_v;
+	if (vi->arx && vi->ary)
+	{
+		layout->ar_mode = 1;
+		layout->ar_num = vi->arx;
+		layout->ar_den = vi->ary;
+	}
 
 	return true;
 }
@@ -3470,6 +3492,11 @@ static void fx_direct_config_update()
 		fx_direct_disable_packet();
 		return;
 	}
+	if (vi->interlaced)
+	{
+		fx_direct_disable_packet();
+		return;
+	}
 
 	if (!fx_direct_is_1080p(&v_cur))
 	{
@@ -3497,7 +3524,7 @@ static void fx_direct_config_update()
 
 	data[8] = (uint8_t)(((layout.ar_mode & 3) << 3) |
 		((menu_present() && (cfg.spd_quirk < 2)) ? 0x04 : 0) |
-		(vi->interlaced ? 0x01 : 0));
+		(vi->rotated ? 0x02 : 0));
 	fx_direct_put_u16(data, 9, layout.top);
 	fx_direct_put_u16(data, 11, layout.bottom);
 	fx_direct_put_u16(data, 13, layout.left);
