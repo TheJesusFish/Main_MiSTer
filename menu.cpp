@@ -1144,6 +1144,7 @@ void HandleUI(void)
 	static int old_volume = 0;
 	static uint32_t lock_pass_timeout = 0;
 	static uint32_t menu_timeout = 0;
+	static int last_menu_present = -1;
 
 	static char	cp_MenuCancel;
 
@@ -7704,6 +7705,10 @@ void HandleUI(void)
 			OsdWrite(18, "", 1, 0);
 		}
 	}
+
+	const int is_menu_present = (menustate != MENU_NONE1) && (menustate != MENU_NONE2);
+	if (last_menu_present >= 0 && last_menu_present != is_menu_present) video_fx_direct_refresh();
+	last_menu_present = is_menu_present;
 }
 
 void open_joystick_setup()
