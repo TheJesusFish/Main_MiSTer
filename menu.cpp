@@ -1144,7 +1144,6 @@ void HandleUI(void)
 	static int old_volume = 0;
 	static uint32_t lock_pass_timeout = 0;
 	static uint32_t menu_timeout = 0;
-	static int last_menu_present = -1;
 
 	static char	cp_MenuCancel;
 
@@ -1209,6 +1208,9 @@ void HandleUI(void)
 		c = menu_key_get();
 	}
 
+	int release = 0;
+	if (c & UPSTROKE) release = 1;
+
 	// decode and set events
 	menu = false;
 	back = false;
@@ -1231,10 +1233,12 @@ void HandleUI(void)
 		static uint32_t wake_release = 0;
 		if (!video_fb_state() && cfg.fb_terminal)
 		{
-			if (c == wake_release)
+			if (wake_release)
 			{
+				uint32_t wr = wake_release;
 				wake_release = 0;
-				c = 0;
+				if (c == wr) c = 0;
+				else if (!c) wake_release = wr;
 			}
 
 			if (timeout && CheckTimer(timeout))
@@ -1266,7 +1270,10 @@ void HandleUI(void)
 				timeout = 0;
 				if (menu_visible <= 0)
 				{
-					wake_release = c | UPSTROKE;
+					// some keys (F12/ESC/Back) act on release, so swallow the
+					// wake-up key's release too, otherwise it flips the OSD
+					// to the system settings page
+					if (c && !(c & UPSTROKE)) wake_release = c | UPSTROKE;
 					c = 0;
 					menu_visible = 1;
 					video_menu_bg(user_io_status_get("[3:1]"));
@@ -5536,7 +5543,7 @@ void HandleUI(void)
 			}
 		}
 
-		if (c & UPSTROKE) PrintDirectory(1);
+		if (release) PrintDirectory(1);
 		break;
 
 		/******************************************************************/
@@ -7697,10 +7704,6 @@ void HandleUI(void)
 			OsdWrite(18, "", 1, 0);
 		}
 	}
-
-	const int is_menu_present = (menustate != MENU_NONE1) && (menustate != MENU_NONE2);
-	if (last_menu_present >= 0 && last_menu_present != is_menu_present) video_fx_direct_refresh();
-	last_menu_present = is_menu_present;
 }
 
 void open_joystick_setup()
@@ -7942,7 +7945,9 @@ void Info(const char *message, int timeout, int width, int height, int frame)
 	if (menustate <= MENU_INFO)
 	{
 		OSD_PrintInfo(message, &width, &height, frame);
-		InfoEnable(20, (cfg.direct_video && get_vga_fb()) ? 30 : 10, width, height);
+		int x = 20, y = (cfg.direct_video && get_vga_fb()) ? 30 : 10;
+		video_fx_direct_info_offset(&x, &y);
+		InfoEnable(x, y, width, height);
 		OsdSetSize(16);
 
 		menu_timer = GetTimer(timeout);

@@ -194,7 +194,6 @@ static_assert(sizeof(vmode_custom_param_t) == sizeof(vmode_custom_t::item));
 // Static fwd decl
 static void video_fb_config();
 static void video_calculate_cvt(int horiz_pixels, int vert_pixels, float refresh_rate, int reduced_blanking, vmode_custom_t *vmode);
-static bool fx_direct_config_enabled();
 static bool fx_direct_video_eligible(const VideoInfo *vi);
 static bool fx_direct_video_active(const VideoInfo *vi);
 
@@ -208,7 +207,7 @@ static bool direct_video_config_enabled()
 
 static bool fx_direct_config_enabled()
 {
-	return cfg.direct_video == 3 && !is_menu();
+	return cfg.direct_video == 3;
 }
 
 static bool supports_pr()
@@ -3535,6 +3534,29 @@ static void fx_direct_disable_packet(bool force = false)
 	fx_direct_packet_enabled = false;
 }
 
+// OSD footprint on the 1080p frame: 256x(128+24) OSD pixels at 3x/4x (osd.v)
+#define FX_DIRECT_OSD_MULT_H 3
+#define FX_DIRECT_OSD_MULT_V 4
+#define FX_DIRECT_OSD_W (256 * FX_DIRECT_OSD_MULT_H)
+#define FX_DIRECT_OSD_H ((128 + 24) * FX_DIRECT_OSD_MULT_V)
+
+static bool fx_direct_osd_fits(const FxDirectLayout *layout)
+{
+	if (cfg.osd_rotate) return false;
+	return layout->scaled_w >= FX_DIRECT_OSD_W && layout->scaled_h >= FX_DIRECT_OSD_H;
+}
+
+void video_fx_direct_info_offset(int *x, int *y)
+{
+	FxDirectLayout layout;
+	if (!fx_direct_video_active(&current_video_info)) return;
+	if (!fx_direct_get_layout(&current_video_info, &layout)) return;
+	if (!fx_direct_osd_fits(&layout)) return;
+
+	*x += layout.left / FX_DIRECT_OSD_MULT_H;
+	*y += layout.top / FX_DIRECT_OSD_MULT_V;
+}
+
 static void fx_direct_config_update()
 {
 	static bool warned_mode = false;
@@ -3565,13 +3587,19 @@ static void fx_direct_config_update()
 	}
 	warned_mode = false;
 
+	// Menu core: permanent full frame menu layout. In cores: menu bit only
+	// when the OSD fits inside the scaled window, full frame 1:1 otherwise.
 	FxDirectLayout layout;
-	const bool menu_open = menu_present() && (cfg.spd_quirk < 2);
-	if (menu_open)
+	const bool menu_core = is_menu();
+	const bool menu_open = menu_core || (menu_present() && (cfg.spd_quirk < 2));
+	const bool have_game = !menu_core && fx_direct_get_layout(vi, &layout);
+	const bool menu_layout = menu_open && (!have_game || !fx_direct_osd_fits(&layout));
+
+	if (menu_layout)
 	{
 		fx_direct_get_menu_layout(&layout);
 	}
-	else if (!fx_direct_get_layout(vi, &layout))
+	else if (!have_game)
 	{
 		fx_direct_disable_packet();
 		return;
@@ -3584,8 +3612,8 @@ static void fx_direct_config_update()
 
 	data[8] = (uint8_t)(((layout.ar_mode & 3) << 3) |
 		(menu_open ? 0x04 : 0) |
-		(!menu_open && vi->rotated ? 0x02 : 0) |
-		(!menu_open && vi->interlaced ? 0x01 : 0));
+		(!menu_layout && vi->rotated ? 0x02 : 0) |
+		(!menu_layout && vi->interlaced ? 0x01 : 0));
 	fx_direct_put_u16(data, 9, layout.top);
 	fx_direct_put_u16(data, 11, layout.bottom);
 	fx_direct_put_u16(data, 13, layout.left);
@@ -3602,11 +3630,6 @@ static void fx_direct_config_update()
 	hdmi_spare_config(0, data);
 	hdmi_spare_config(1, 0);
 	fx_direct_packet_enabled = true;
-}
-
-void video_fx_direct_refresh()
-{
-	fx_direct_config_update();
 }
 
 static void set_yc_mode()
@@ -3739,28 +3762,56 @@ static void spd_config_update()
 	}
 }
 
+// FX-Direct metadata depends on the final output mode, so it runs after mode
+// adjustment. The first packet after a video change is delayed to let the new
+// mode settle before the scaler sees FX-Direct metadata.
+static void fx_direct_poll(bool changed, const VideoInfo *vi)
+{
+	static unsigned long send_tmr = 0;
+
+	if (!fx_direct_video_eligible(vi))
+	{
+		send_tmr = 0;
+		if (changed) fx_direct_config_update();
+	}
+	else if (changed)
+	{
+		// Menu core skips the settle delay so the packet is present at lock
+		if (fx_direct_packet_enabled || is_menu())
+		{
+			spd_config_update();
+		}
+		else
+		{
+			fx_direct_disable_packet(true);
+			send_tmr = GetTimer(1000);
+		}
+	}
+	else if (send_tmr && CheckTimer(send_tmr))
+	{
+		send_tmr = 0;
+		spd_config_update();
+	}
+}
+
 #define fr_constrain(fr) ((cfg.refresh_min && fr < cfg.refresh_min) ? cfg.refresh_min : (cfg.refresh_max && fr > cfg.refresh_max) ? cfg.refresh_max : fr)
 
 void video_mode_adjust(bool force)
 {
 	static bool rep_force = false;
-	static unsigned long fx_direct_send_tmr = 0;
 	if (force) rep_force = true;
 
 	VideoInfo video_info;
 
 	const bool vid_changed = get_video_info(rep_force, &video_info);
-	const bool fx_update = vid_changed || rep_force;
+	const bool changed = vid_changed || rep_force;
 	current_video_info = video_info;
 
-	if (vid_changed || rep_force)
+	if (changed)
 	{
 		show_video_info(&video_info, &v_cur);
 		set_yc_mode();
-		if (!fx_direct_video_eligible(&video_info))
-		{
-			spd_config_update();
-		}
+		if (!fx_direct_video_eligible(&video_info)) spd_config_update();
 	}
 	rep_force = false;
 
@@ -3849,28 +3900,7 @@ void video_mode_adjust(bool force)
 		set_vfilter(0); // update filters if flags have changed
 	}
 
-	if (!fx_direct_video_eligible(&video_info))
-	{
-		fx_direct_send_tmr = 0;
-		if (fx_update) fx_direct_config_update();
-	}
-	else if (fx_update)
-	{
-		if (fx_direct_packet_enabled)
-		{
-			spd_config_update();
-		}
-		else
-		{
-			fx_direct_disable_packet(true);
-			fx_direct_send_tmr = GetTimer(1000);
-		}
-	}
-	else if (fx_direct_send_tmr && CheckTimer(fx_direct_send_tmr))
-	{
-		fx_direct_send_tmr = 0;
-		spd_config_update();
-	}
+	fx_direct_poll(changed, &video_info);
 }
 
 static void fb_write_module_params()
@@ -4907,3 +4937,4 @@ int video_get_rotated()
 {
   return current_video_info.rotated;
 }
+
