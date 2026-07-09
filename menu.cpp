@@ -3183,23 +3183,23 @@ void HandleUI(void)
 
 			MenuWrite(n++);
 			sprintf(s, " Gamma correction - %s", (video_get_gamma_en() > 0) ? "On" : "Off");
-			MenuWrite(n++, s, menusub == 9, video_get_gamma_en() < 0);
+			MenuWrite(n++, s, menusub == 9, video_get_gamma_en() < 0 || cfg.direct_video == 3);
 			strcpy(s, " ");
 			if (strlen(video_get_gamma_curve())) strncat(s, video_get_gamma_curve(), 25);
 			else strcpy(s, " < none >");
 			while (strlen(s) < 26) strcat(s, " ");
 			strcat(s, " \x16 ");
-			MenuWrite(n++, s, menusub == 10, (video_get_gamma_en() <= 0) || !S_ISDIR(getFileType(GAMMA_DIR)));
+			MenuWrite(n++, s, menusub == 10, (video_get_gamma_en() <= 0) || cfg.direct_video == 3 || !S_ISDIR(getFileType(GAMMA_DIR)));
 
 			MenuWrite(n++);
 			sprintf(s, " Shadow Mask - %s", (video_get_shadow_mask_mode() < 0) ? config_smask_msg[0] : config_smask_msg[video_get_shadow_mask_mode()]);
-			MenuWrite(n++, s, menusub == 11, video_get_shadow_mask_mode() < 0);
+			MenuWrite(n++, s, menusub == 11, video_get_shadow_mask_mode() < 0 || cfg.direct_video == 3);
 			strcpy(s, " ");
 			if (strlen(video_get_shadow_mask())) strncat(s, video_get_shadow_mask(), 25);
 			else strcpy(s, " < none >");
 			while (strlen(s) < 26) strcat(s, " ");
 			strcat(s, " \x16 ");
-			MenuWrite(n++, s, menusub == 12, (video_get_shadow_mask_mode() <= 0) || !S_ISDIR(getFileType(SMASK_DIR)));
+			MenuWrite(n++, s, menusub == 12, (video_get_shadow_mask_mode() <= 0) || cfg.direct_video == 3 || !S_ISDIR(getFileType(SMASK_DIR)));
 
 			MenuWrite(n++);
 			MenuWrite(n++, " Reset to Defaults", menusub == 13);
@@ -3311,12 +3311,12 @@ void HandleUI(void)
 				break;
 
 			case 9:
-				if (video_get_gamma_en() >= 0) video_set_gamma_en(video_get_gamma_en() ? 0 : 1);
+				if (video_get_gamma_en() >= 0 && cfg.direct_video != 3) video_set_gamma_en(video_get_gamma_en() ? 0 : 1);
 				menustate = parentstate;
 				break;
 
 			case 10:
-				if (video_get_gamma_en() > 0)
+				if (video_get_gamma_en() > 0 && cfg.direct_video != 3)
 				{
 					snprintf(Selected_tmp, sizeof(Selected_tmp), GAMMA_DIR"/%s", video_get_gamma_curve(0));
 					if (!FileExists(Selected_tmp)) snprintf(Selected_tmp, sizeof(Selected_tmp), GAMMA_DIR);
@@ -3325,12 +3325,12 @@ void HandleUI(void)
 				break;
 
 			case 11:
-				if (video_get_shadow_mask_mode() >= 0) video_set_shadow_mask_mode(video_get_shadow_mask_mode() + 1);
+				if (video_get_shadow_mask_mode() >= 0 && cfg.direct_video != 3) video_set_shadow_mask_mode(video_get_shadow_mask_mode() + 1);
 				menustate = parentstate;
 				break;
 
 			case 12:
-				if (video_get_shadow_mask_mode() > 0)
+				if (video_get_shadow_mask_mode() > 0 && cfg.direct_video != 3)
 				{
 					snprintf(Selected_tmp, sizeof(Selected_tmp), SMASK_DIR"/%s", video_get_shadow_mask(0));
 					if (!FileExists(Selected_tmp)) snprintf(Selected_tmp, sizeof(Selected_tmp), SMASK_DIR);
@@ -7704,6 +7704,8 @@ void HandleUI(void)
 			OsdWrite(18, "", 1, 0);
 		}
 	}
+
+	menu_fx_direct_poll();
 }
 
 void open_joystick_setup()
@@ -7938,6 +7940,14 @@ void MenuHide()
 int menu_present()
 {
 	return (menustate != MENU_NONE1) && (menustate != MENU_NONE2);
+}
+
+void menu_fx_direct_poll()
+{
+	static int last = -1;
+	const int now = menu_present();
+	if (last >= 0 && last != now) video_fx_direct_refresh();
+	last = now;
 }
 
 void Info(const char *message, int timeout, int width, int height, int frame)

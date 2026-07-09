@@ -60,6 +60,7 @@ int   video_get_rotated();
 void video_cfg_reset();
 
 void  video_mode_adjust(bool force = false);
+void  video_fx_direct_refresh();
 void  video_fx_direct_info_offset(int *x, int *y);
 
 int   hasAPI1_5();

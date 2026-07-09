@@ -25,5 +25,6 @@ void StoreIdx_F(int idx, const char *path);
 void StoreIdx_S(int idx, const char *path);
 
 int menu_present();
+void menu_fx_direct_poll();
 
 #endif

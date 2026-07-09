@@ -3730,7 +3730,9 @@ void user_io_poll()
 			}
 		}
 
-		res_timer = GetTimer(500);
+		// FX-Direct: poll faster so the scaler metadata tracks core video
+		// changes promptly; a no-change poll costs a few SPI reads and no i2c
+		res_timer = GetTimer((cfg.direct_video == 3) ? 100 : 500);
 		if (!minimig_get_adjust())
 		{
 			if (is_minimig()) minimig_adjust_vsize(0);
