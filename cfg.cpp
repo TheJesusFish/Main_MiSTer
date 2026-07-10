@@ -623,6 +623,14 @@ void cfg_parse()
 		ini_parse(altcfg(), video_get_core_mode_name(0));
 	}
 
+	if (cfg.direct_video == 3 && cfg.spd_quirk == 3)
+	{
+		static bool warned = false;
+		if (!warned) printf("FX-Direct disabled: spd_quirk=3 is incompatible with required VSIF updates.\n");
+		warned = true;
+		cfg.direct_video = 0;
+	}
+
 	if (strlen(cfg.vga_mode))
 	{
 		if (!strcasecmp(cfg.vga_mode, "rgb")) cfg.vga_mode_int = 0;
