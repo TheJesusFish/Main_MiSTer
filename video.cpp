@@ -197,8 +197,9 @@ static void video_calculate_cvt(int horiz_pixels, int vert_pixels, float refresh
 struct FxDirectLayout;
 static bool fx_direct_video_eligible(const VideoInfo *vi);
 static bool fx_direct_video_active(const VideoInfo *vi, FxDirectLayout *layout = NULL);
-static void fx_direct_disable_packet(bool force = false);
+static void fx_direct_disable_packet();
 static void fx_direct_poll(bool changed, const VideoInfo *vi);
+static void spd_config_update();
 
 static vmode_custom_t v_cur = {}, v_def = {}, v_pal = {}, v_ntsc = {};
 static int vmode_def = 0, vmode_pal = 0, vmode_ntsc = 0;
@@ -210,6 +211,18 @@ static bool fx_framelock_ok = false;
 static bool fx_direct_force_adjust = false;
 static unsigned long fx_direct_interlace_on_tmr = 0;
 static unsigned long fx_direct_interlace_off_tmr = 0;
+static int fx_direct_mode = -1;
+
+static void fx_direct_reset_state()
+{
+	fx_applied_fpix = 0;
+	fx_direct_packet_enabled = false;
+	fx_direct_interlace_pixels = false;
+	fx_direct_update_pending = false;
+	fx_framelock_ok = false;
+	fx_direct_interlace_on_tmr = 0;
+	fx_direct_interlace_off_tmr = 0;
+}
 
 static bool direct_video_config_enabled()
 {
@@ -219,6 +232,11 @@ static bool direct_video_config_enabled()
 static bool fx_direct_config_enabled()
 {
 	return cfg.direct_video == 3;
+}
+
+static bool fx_direct_source_interlaced(const VideoInfo *vi)
+{
+	return vi && vi->interlaced && !vi->fb_en;
 }
 
 static bool supports_pr()
@@ -736,12 +754,16 @@ static char has_gamma = 0; // set in video_init
 static void setGamma()
 {
 	PROFILE_FUNCTION();
+	static bool fx_direct_suppressed = false;
 
 	if (fx_direct_config_enabled())
 	{
-		if (has_gamma) spi_uio_cmd8(UIO_SET_GAMMA, 0);
+		if (has_gamma && !fx_direct_suppressed) spi_uio_cmd8(UIO_SET_GAMMA, 0);
+		fx_direct_suppressed = true;
 		return;
 	}
+	if (fx_direct_suppressed && has_gamma) spi_uio_cmd8(UIO_SET_GAMMA, gamma_cfg[0]);
+	fx_direct_suppressed = false;
 
 	if (!memcmp(active_gamma_cfg, gamma_cfg, sizeof(gamma_cfg))) return;
 
@@ -2674,7 +2696,25 @@ static int should_auto_enable_direct_video()
 	return 0;
 }
 
-static void video_mode_load(bool keep_direct_video_auto = false)
+static void fx_direct_mode_update(bool link_reset)
+{
+	const bool enabled = fx_direct_config_enabled();
+	const bool changed = fx_direct_mode >= 0 && fx_direct_mode != enabled;
+
+	if (changed && !link_reset)
+	{
+		hdmi_config_init();
+		hdmi_invalidate_mode_cache();
+		hdmi_config_set_hdr();
+		use_freesync_spd = 0;
+		spd_config_update();
+	}
+
+	if (link_reset || changed || fx_direct_mode < 0) fx_direct_reset_state();
+	fx_direct_mode = enabled;
+}
+
+static void video_mode_load(bool keep_direct_video_auto = false, bool link_reset = false)
 {
 	static bool direct_video_auto = false;
 
@@ -2697,6 +2737,8 @@ static void video_mode_load(bool keep_direct_video_auto = false)
 		// direct_video=2 resolves here, so refresh HDMI CSC with final mode.
 		hdmi_config_set_csc();
 	}
+
+	fx_direct_mode_update(link_reset);
 
 	if (fx_direct_config_enabled() && cfg.vsync_adjust != 2)
 	{
@@ -2729,13 +2771,6 @@ static void video_mode_load(bool keep_direct_video_auto = false)
 	{
 		printf("FX-Direct: forcing HDMI video_mode to 8.\n");
 		store_predefined_video_mode(8, &v_def);
-		fx_direct_disable_packet(true); // HDMI is reconfigured, resend from scratch
-		fx_applied_fpix = 0;
-		fx_direct_interlace_pixels = false;
-		fx_direct_update_pending = false;
-		fx_framelock_ok = false;
-		fx_direct_interlace_on_tmr = 0;
-		fx_direct_interlace_off_tmr = 0;
 
 		vmode_def = 1;
 		vmode_pal = 0;
@@ -2819,7 +2854,7 @@ void video_init()
 	}
 
 	hdmi_config_set_hdr();
-	video_mode_load();
+	video_mode_load(false, true);
 
 	has_gamma = spi_uio_cmd(UIO_SET_GAMMA);
 
@@ -2849,7 +2884,7 @@ void video_reinit()
 	hdmi_config_set_hdr();
 
 	support_FHD = 0;
-	video_mode_load(true);
+	video_mode_load(true, true);
 
 	video_cfg_init();
 	video_set_mode(&v_def, 0);
@@ -3337,7 +3372,7 @@ static void video_scaling_adjust(const VideoInfo *vi, const vmode_custom_t *vm)
 {
 	// Interlaced with OSD open: drop to the normal scaler so the transport is
 	// truly progressive while the full frame menu layout is advertised
-	const bool fx_menu_fallback = vi && vi->interlaced && menu_present();
+	const bool fx_menu_fallback = fx_direct_source_interlaced(vi) && menu_present();
 	const uint16_t fx_interlace = fx_direct_interlace_pixels ? FX_DIRECT_INTERLACE_FLAG : 0;
 	FxDirectLayout layout;
 	if (fx_direct_video_active(vi, &layout) && !fx_menu_fallback)
@@ -3471,14 +3506,15 @@ static bool fx_direct_get_layout(const VideoInfo *vi, FxDirectLayout *layout)
 
 	uint32_t src_w = vi->fb_en && vi->fb_width ? vi->fb_width : vi->rotated ? vi->height : vi->width;
 	uint32_t src_h = vi->fb_en && vi->fb_height ? vi->fb_height : vi->rotated ? vi->width : vi->height;
-	if (vi->interlaced) src_h = (src_h + 1) / 2;
+	const bool interlaced = fx_direct_source_interlaced(vi);
+	if (interlaced) src_h = (src_h + 1) / 2;
 	if (!src_w || !src_h || src_w > FX_DIRECT_WIDTH || src_h > FX_DIRECT_HEIGHT) return false;
 
 	uint32_t prescale_h = FX_DIRECT_WIDTH / src_w;
 	uint32_t prescale_v = FX_DIRECT_HEIGHT / src_h;
 	if (!prescale_h || !prescale_v || prescale_h > 255 || prescale_v > 255) return false;
 	if (prescale_h < 2 || prescale_v < 2) return false;
-	if (!vi->interlaced)
+	if (!interlaced)
 	{
 		uint32_t prescale = (prescale_h < prescale_v) ? prescale_h : prescale_v;
 		prescale_h = prescale;
@@ -3527,7 +3563,7 @@ static void fx_direct_get_menu_layout(FxDirectLayout *layout)
 static bool fx_direct_video_eligible(const VideoInfo *vi)
 {
 	return fx_direct_config_enabled() && vi && vi->width && vi->height &&
-		(!vi->interlaced || (supports_fx_direct_interlace() && cfg.vsync_adjust == 2 && fx_framelock_ok));
+		(!fx_direct_source_interlaced(vi) || (supports_fx_direct_interlace() && cfg.vsync_adjust == 2 && fx_framelock_ok));
 }
 
 static bool fx_direct_video_active(const VideoInfo *vi, FxDirectLayout *layout)
@@ -3543,12 +3579,11 @@ static void fx_direct_put_u16(uint8_t *data, int idx, uint16_t value)
 	data[idx + 1] = (uint8_t)(value >> 8);
 }
 
-static void fx_direct_disable_packet(bool force)
+static void fx_direct_disable_packet()
 {
-	if (!force && !fx_direct_packet_enabled) return;
+	if (!fx_direct_packet_enabled) return;
 
 	hdmi_spare_config(0, 0);
-	hdmi_spare_config(1, 0);
 	fx_direct_packet_enabled = false;
 }
 
@@ -3610,7 +3645,7 @@ static void fx_direct_config_update()
 	const bool menu_core = is_menu();
 	const bool menu_open = menu_core || menu_present();
 	const bool have_game = !menu_core && fx_direct_get_layout(vi, &layout);
-	const bool menu_layout = menu_open && (!have_game || !fx_direct_osd_fits(&layout) || vi->interlaced);
+	const bool menu_layout = menu_open && (!have_game || !fx_direct_osd_fits(&layout) || fx_direct_source_interlaced(vi));
 
 	if (menu_layout)
 	{
@@ -3622,7 +3657,7 @@ static void fx_direct_config_update()
 		return;
 	}
 
-	const bool interlaced = !menu_layout && vi->interlaced;
+	const bool interlaced = !menu_layout && fx_direct_source_interlaced(vi);
 	if (interlaced && !fx_direct_interlace_pixels) return;
 
 	uint8_t data[FX_DIRECT_VSIF_SIZE] = {
@@ -3658,7 +3693,6 @@ static void fx_direct_config_update()
 		menu_open ? ", menu" : "");
 
 	hdmi_spare_config(0, data);
-	if (!fx_direct_packet_enabled) hdmi_spare_config(1, 0);
 	fx_direct_packet_enabled = true;
 }
 
@@ -3730,8 +3764,6 @@ static void set_yc_mode()
 
 static void spd_config_update()
 {
-	fx_direct_config_update();
-
 	if (use_freesync_spd) return;
 
 	if (direct_video_config_enabled() && (cfg.spd_quirk < 3))
@@ -3794,7 +3826,7 @@ static void spd_config_update()
 
 static bool fx_direct_wants_interlace(const VideoInfo *vi)
 {
-	return vi && vi->interlaced && !is_menu() && !menu_present() && fx_direct_video_active(vi);
+	return fx_direct_source_interlaced(vi) && !is_menu() && !menu_present() && fx_direct_video_active(vi);
 }
 
 static void fx_direct_set_interlace_pixels(bool enable, const VideoInfo *vi)
@@ -3847,7 +3879,7 @@ static void fx_direct_poll(bool changed, const VideoInfo *vi)
 
 	if (fx_direct_update_pending && !fx_direct_interlace_on_tmr)
 	{
-		spd_config_update();
+		fx_direct_config_update();
 		fx_direct_update_pending = false;
 	}
 
@@ -3863,14 +3895,6 @@ void video_fx_direct_refresh()
 
 #define fr_constrain(fr) ((cfg.refresh_min && fr < cfg.refresh_min) ? cfg.refresh_min : (cfg.refresh_max && fr > cfg.refresh_max) ? cfg.refresh_max : fr)
 
-static bool fx_vi_same_mode(const VideoInfo *a, const VideoInfo *b)
-{
-	return a->width == b->width && a->height == b->height &&
-		a->interlaced == b->interlaced && a->rotated == b->rotated &&
-		a->arx == b->arx && a->ary == b->ary &&
-		a->fb_en == b->fb_en && a->fb_width == b->fb_width && a->fb_height == b->fb_height;
-}
-
 void video_mode_adjust(bool force)
 {
 	static bool rep_force = false;
@@ -3880,26 +3904,7 @@ void video_mode_adjust(bool force)
 
 	VideoInfo video_info;
 
-	bool vid_changed = get_video_info(rep_force, &video_info);
-
-	// Require two matching reads before applying an FX-Direct mode change.
-	if (cfg.direct_video == 3 && !rep_force)
-	{
-		static VideoInfo vi_pending;
-		static bool vi_confirm = false;
-		if (vid_changed || vi_confirm)
-		{
-			if (!vid_changed) get_video_info(true, &video_info);
-			if (!vi_confirm || !fx_vi_same_mode(&vi_pending, &video_info))
-			{
-				vi_pending = video_info;
-				vi_confirm = true;
-				return;
-			}
-			vi_confirm = false;
-			vid_changed = true;
-		}
-	}
+	const bool vid_changed = get_video_info(rep_force, &video_info);
 
 	const bool changed = vid_changed || rep_force;
 	current_video_info = video_info;
@@ -3908,7 +3913,7 @@ void video_mode_adjust(bool force)
 	{
 		show_video_info(&video_info, &v_cur);
 		set_yc_mode();
-		if (!fx_direct_config_enabled()) spd_config_update();
+		spd_config_update();
 	}
 	rep_force = false;
 
