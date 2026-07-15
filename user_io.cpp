@@ -3019,6 +3019,7 @@ void user_io_send_buttons(char force)
 	if (cfg.hdmi_limited & 2) map |= CONF_HDMI_LIMITED2;
 	if (cfg.direct_video == 1 || cfg.direct_video == 2) map |= CONF_DIRECT_VIDEO;
 	if (cfg.direct_video == 2) map |= CONF_DIRECT_VIDEO2;
+	if (cfg.direct_video == 3) map |= CONF_FX_DIRECT;
 	if (vga_fb) map |= CONF_VGA_FB;
 
 	if ((map != key_map) || force)
