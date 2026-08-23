@@ -649,6 +649,9 @@ void cfg_parse()
 		cfg.direct_video = 0;
 		cfg.vrr_mode = 0;
 		cfg.hdr = 0;
+		// Limited range would clip the interlace control pixels to 0x10/0xEB.
+		cfg.hdmi_limited = 0;
+		cfg.dvi_mode = 0;
 	}
 }
 

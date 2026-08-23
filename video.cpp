@@ -196,6 +196,7 @@ static_assert(sizeof(vmode_custom_param_t) == sizeof(vmode_custom_t::item));
 
 // Static fwd decl
 static void video_fb_config();
+static void fx_direct_poll();
 static void video_calculate_cvt(int horiz_pixels, int vert_pixels, float refresh_rate, int reduced_blanking, vmode_custom_t *vmode);
 
 static vmode_custom_t v_cur = {}, v_def = {}, v_pal = {}, v_ntsc = {};
@@ -207,7 +208,24 @@ static bool fx_direct_config_enabled()
 	return cfg.fx_direct != 0;
 }
 
+// Cores built against an older framework do not answer this bit and keep the
+// normal deinterlaced path.
+static bool fx_supports_interlace()
+{
+	static uint16_t ver = 0xffff;
+	if (ver == 0xffff) ver = spi_uio_cmd(UIO_SET_VIDEO) & 4;
+	return ver != 0;
+}
+
 static uint8_t fx_last_packet[31];
+
+// Interlace handshake. The sink must never see the interlace flag without the
+// control pixels behind it, so the pixels lead going in and trail coming out.
+#define FX_ILACE_GUARD_MS 50
+static bool fx_framelock_ok = false;
+static bool fx_ilace_px = false;   // control pixels enabled in the core
+static bool fx_ilace_i  = false;   // interlace flag published in the InfoFrame
+static unsigned long fx_ilace_tmr = 0;
 
 static void fx_packet_reset()
 {
@@ -2295,6 +2313,9 @@ static void video_set_mode(vmode_custom_t *v, double Fpix)
 
 	printf("%chsync, %cvsync\n", !!v_cur.param.hpol ? '+' : '-', !!v_cur.param.vpol ? '+' : '-');
 
+	// Same condition that drives the FPGA's lowlat bit, so the two cannot disagree.
+	fx_framelock_ok = Fpix && cfg.vsync_adjust == 2 && !is_menu();
+
 	printf("PLL: ");
 	for (int i = 9; i < 21; i++)
 	{
@@ -2790,6 +2811,8 @@ void video_hdmi_power(int on)
 
 void video_poll()
 {
+	fx_direct_poll();
+
 	if (!hdmi_has_int()) return;
 
 	cec_poll();
@@ -3054,30 +3077,41 @@ struct fx_layout_t
 {
 	uint16_t w, h;      // scaled window size
 	uint16_t x, y;      // window origin inside the output frame
-	uint8_t  scale;     // integer factor, identical for both axes
+	uint8_t  scale_h;   // integer factor, per axis
+	uint8_t  scale_v;
+	bool     ilace;     // one source field per output frame
 };
 
-// Largest square integer scale of the source that still fits the output frame.
-static bool fx_get_layout(const VideoInfo *vi, const vmode_custom_t *vm, fx_layout_t *l)
+// Largest integer scale of the source that still fits the output frame. Square for
+// progressive; per axis when each field is sent as its own frame, since a field is
+// half height and the aspect ratio is carried separately.
+static bool fx_get_layout(const VideoInfo *vi, const vmode_custom_t *vm, fx_layout_t *l, bool ilace)
 {
 	memset(l, 0, sizeof(*l));
 	if (!fx_direct_config_enabled() || !vi || !vm) return false;
 
 	const uint32_t sw = vi->fb_en ? vi->fb_width  : vi->rotated ? vi->height : vi->width;
-	const uint32_t sh = vi->fb_en ? vi->fb_height : vi->rotated ? vi->width  : vi->height;
+	uint32_t sh = vi->fb_en ? vi->fb_height : vi->rotated ? vi->width  : vi->height;
 	const uint32_t ow = vm->item[1], oh = vm->item[5];
 	if (!sw || !sh || !ow || !oh) return false;
 
-	uint32_t k = ow / sw;
-	if ((oh / sh) < k) k = oh / sh;
-	if (k < 2 || k > 255) return false;
+	if (ilace) sh = (sh + 1) / 2; // reported height covers both fields
 
-	l->scale = (uint8_t)k;
-	l->w = (uint16_t)(sw * k);
-	l->h = (uint16_t)(sh * k);
+	uint32_t kh = ow / sw, kv = oh / sh;
+	if (!ilace && kv < kh) kh = kv;
+	if (!ilace) kv = kh;
+	if (kh < 2 || kv < 2 || kh > 255 || kv > 255) return false;
+
+	l->scale_h = (uint8_t)kh;
+	l->scale_v = (uint8_t)kv;
+	l->ilace = ilace;
+	l->w = (uint16_t)(sw * kh);
+	l->h = (uint16_t)(sh * kv);
 	// Must match the centering done in sys_top.v, which uses a truncating shift.
 	l->x = (uint16_t)((ow - l->w) >> 1);
 	l->y = (uint16_t)((oh - l->h) >> 1);
+	// The control pixels occupy the first five lines and must not land on picture.
+	if (ilace && l->y < 5) return false;
 	return true;
 }
 
@@ -3093,17 +3127,15 @@ static void fx_packet_update(const VideoInfo *vi, const fx_layout_t *l)
 	uint8_t d[31] = { 0x81, 0x01, 0x1B, 0x00, 0x49, 0x31, 0xF4, 0x02 };
 
 	const bool have_ar = vi->arx && vi->ary;
-	// Interlaced (bit 0) stays clear: ascal has already deinterlaced, and claiming
-	// interlace without field control pixels is undefined for the sink.
-	d[8] = (uint8_t)((vi->rotated ? 0x02 : 0) | (have_ar ? 0x08 : 0));
+	d[8] = (uint8_t)((l->ilace ? 0x01 : 0) | (vi->rotated ? 0x02 : 0) | (have_ar ? 0x08 : 0));
 
 	fx_put16(d, 9, l->y);
 	fx_put16(d, 11, (uint16_t)(l->y + l->h));
 	fx_put16(d, 13, l->x);
 	fx_put16(d, 15, (uint16_t)(l->x + l->w));
 
-	d[17] = l->scale;
-	d[18] = l->scale;
+	d[17] = l->scale_h;
+	d[18] = l->scale_v;
 
 	fx_put16(d, 19, (uint16_t)(have_ar ? vi->arx : l->w));
 	fx_put16(d, 21, (uint16_t)(have_ar ? vi->ary : l->h));
@@ -3126,32 +3158,95 @@ static void fx_menu_packet_update(const vmode_custom_t *vm)
 	fx_layout_t l = {};
 	l.w = (uint16_t)vm->item[1];
 	l.h = (uint16_t)vm->item[5];
-	l.scale = 1;
+	l.scale_h = 1;
+	l.scale_v = 1;
 
 	VideoInfo mvi = {};
 	fx_packet_update(&mvi, &l);
+}
+
+// One source field per output frame, which the core can only do if it was built
+// against a framework that implements it and the output is frame locked.
+static bool fx_want_interlace(const VideoInfo *vi, const vmode_custom_t *vm)
+{
+	fx_layout_t l;
+	return fx_direct_config_enabled() && fx_supports_interlace()
+		&& vi && vi->interlaced && !vi->fb_en
+		&& !is_menu() && !menu_present()
+		&& cfg.vsync_adjust == 2 && fx_framelock_ok
+		&& fx_get_layout(vi, vm, &l, true);
+}
+
+static void fx_apply(const VideoInfo *vi, const vmode_custom_t *vm)
+{
+	fx_layout_t l;
+	// The OSD is drawn after the scaler, so anything outside the window is cropped.
+	const uint16_t px = fx_ilace_px ? 0x4000 : 0;
+
+	if (!menu_present() && fx_get_layout(vi, vm, &l, fx_ilace_i))
+	{
+		printf("FX-Direct: %ux%u x%u/%u window at %u,%u%s\n",
+			l.w, l.h, l.scale_h, l.scale_v, l.x, l.y, l.ilace ? " interlaced" : "");
+		spi_uio_cmd16(UIO_SETHEIGHT, l.h);
+		spi_uio_cmd16(UIO_SETWIDTH, 0x8000 | px | l.w); // bit 15 = FREESCALE
+		fx_packet_update(vi, &l);
+	}
+	else
+	{
+		spi_uio_cmd16(UIO_SETHEIGHT, 0);
+		spi_uio_cmd16(UIO_SETWIDTH, px);
+		fx_menu_packet_update(vm);
+	}
+	minimig_set_adjust(2);
+}
+
+// Advance the handshake by one step. Returns true if anything changed.
+static bool fx_ilace_step(const VideoInfo *vi, const vmode_custom_t *vm)
+{
+	const bool want = fx_want_interlace(vi, vm);
+
+	if (want && !fx_ilace_i)
+	{
+		if (!fx_ilace_px)
+		{
+			fx_ilace_px = true;                          // pixels first
+			fx_ilace_tmr = GetTimer(FX_ILACE_GUARD_MS);
+			return true;
+		}
+		if (fx_ilace_tmr && CheckTimer(fx_ilace_tmr))
+		{
+			fx_ilace_tmr = 0;
+			fx_ilace_i = true;                           // then the flag
+			return true;
+		}
+	}
+	else if (!want && fx_ilace_i)
+	{
+		fx_ilace_i = false;                              // flag first
+		fx_ilace_tmr = GetTimer(FX_ILACE_GUARD_MS);
+		return true;
+	}
+	else if (!want && fx_ilace_px && fx_ilace_tmr && CheckTimer(fx_ilace_tmr))
+	{
+		fx_ilace_tmr = 0;
+		fx_ilace_px = false;                             // then the pixels
+		return true;
+	}
+	return false;
+}
+
+static void fx_direct_poll()
+{
+	if (!fx_direct_config_enabled() || !fx_ilace_tmr) return;
+	if (fx_ilace_step(&current_video_info, &v_cur)) fx_apply(&current_video_info, &v_cur);
 }
 
 static void video_scaling_adjust(const VideoInfo *vi, const vmode_custom_t *vm)
 {
 	if (fx_direct_config_enabled())
 	{
-		fx_layout_t l;
-		// The OSD is drawn after the scaler, so anything outside the window is cropped.
-		if (!menu_present() && fx_get_layout(vi, vm, &l))
-		{
-			printf("FX-Direct: %ux%u x%u window at %u,%u\n", l.w, l.h, l.scale, l.x, l.y);
-			spi_uio_cmd16(UIO_SETHEIGHT, l.h);
-			spi_uio_cmd16(UIO_SETWIDTH, 0x8000 | l.w); // bit 15 = FREESCALE
-			fx_packet_update(vi, &l);
-		}
-		else
-		{
-			spi_uio_cmd16(UIO_SETHEIGHT, 0);
-			spi_uio_cmd16(UIO_SETWIDTH, 0);
-			fx_menu_packet_update(vm);
-		}
-		minimig_set_adjust(2);
+		fx_ilace_step(vi, vm);
+		fx_apply(vi, vm);
 		return;
 	}
 
