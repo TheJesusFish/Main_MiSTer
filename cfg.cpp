@@ -114,6 +114,7 @@ static const ini_var_t ini_vars[] =
 	{ "HDMI_GAME_MODE", (void *)(&(cfg.hdmi_game_mode)), UINT8, 0, 1 },
 	{ "VRR_MODE", (void *)(&(cfg.vrr_mode)), UINT8, 0, 4 },
 	{ "VRR_VESA_FRAMERATE", (void *)(&(cfg.vrr_vesa_framerate)), UINT8, 0, 255 },
+	{ "VRR_LOWLAT", (void *)(&(cfg.vrr_lowlat)), UINT8, 0, 1 },
 	{ "VIDEO_OFF", (void*)(&(cfg.video_off)), INT16, 0, 3600 },
 	{ "VIDEO_OFF_LOGO", (void*)(&(cfg.video_off_logo)), UINT8, 0, 1 },
 	{ "PLAYER_1_CONTROLLER", (void*)(&(cfg.player_controller[0])), STRINGARR, sizeof(cfg.player_controller[0]) / sizeof(cfg.player_controller[0][0]), sizeof(cfg.player_controller[0][0]) },

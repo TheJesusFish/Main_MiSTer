@@ -67,9 +67,11 @@ static int hdmi_edid_fd = -1;
 static int hdmi_spd_fd  = -1;
 
 static int     use_vrr = 0;
+static int     vrr_ll = 0;
 static int     use_freesync_spd = 0;
 static uint8_t vrr_min_fr = 0;
 static uint8_t vrr_max_fr = 0;
+static uint8_t vrr_clk_fr = 0;
 
 static volatile uint32_t *fb_base = 0;
 static int fb_enabled = 0;
@@ -221,6 +223,13 @@ static bool supports_pr()
 {
 	static uint16_t video_version = 0xffff;
 	if (video_version == 0xffff) video_version = spi_uio_cmd(UIO_SET_VIDEO) & 1;
+	return video_version != 0;
+}
+
+static bool supports_vrr_ll()
+{
+	static uint16_t video_version = 0xffff;
+	if (video_version == 0xffff) video_version = spi_uio_cmd(UIO_SET_VIDEO) & 8;
 	return video_version != 0;
 }
 
@@ -2160,6 +2169,7 @@ static void set_vrr_infoframes()
 
 	vrr_min_fr = 0;
 	vrr_max_fr = 0;
+	vrr_clk_fr = 0;
 
 	if (use_vrr == VRR_VESA && !vrateh) return;
 	if (use_vrr)
@@ -2175,6 +2185,11 @@ static void set_vrr_infoframes()
 
 		if (!vrr_min_fr) vrr_min_fr = 47;
 		if (!vrr_max_fr) vrr_max_fr = 62;
+
+		int horz = v_cur.param.hact + v_cur.param.hbp + v_cur.param.hfp + v_cur.param.hs;
+		int vert = v_cur.param.vact + v_cur.param.vbp + v_cur.param.vfp + v_cur.param.vs;
+		int rate_nom = (int)((v_cur.Fpix * 1000000.0) / (horz * vert) + 0.5);
+		vrr_clk_fr = (vrr_max_fr < rate_nom + 1) ? rate_nom + 1 : vrr_max_fr;
 
 		vrr_modes[use_vrr].active = 1;
 		printf("VRR: Set %s active\n", vrr_modes[use_vrr].description);
@@ -2231,6 +2246,21 @@ static void set_vrr_infoframes()
 	if (!supports_vrr() || video_vsync_adjust()) use_vrr = 0;
 }
 
+static void vrr_ll_update()
+{
+	const VideoInfo *vi = &current_video_info;
+	if (!vrr_ll || !vi->htime || !vi->height || !v_cur.Fpix) return;
+
+	double oline = (v_cur.param.hact + v_cur.param.hfp + v_cur.param.hs + v_cur.param.hbp) / v_cur.Fpix;
+	double oact = oline * v_cur.param.vact;
+	double iact = (vi->interlaced ? vi->height / 2 : vi->height) * (vi->htime / 100.0);
+	int off = 16;
+	if (iact > oact) off += (int)((iact - oact) / oline) + 1;
+	if (off > 4095) off = 4095;
+	printf("VRR low latency: offset %d lines\n", off);
+	spi_uio_cmd16(UIO_SET_VRROFF, off);
+}
+
 static void set_vrr_mode()
 {
 	PROFILE_FUNCTION();
@@ -2249,6 +2279,7 @@ static void video_set_mode(vmode_custom_t *v, double Fpix)
 	v_cur = *v;
 	vmode_custom_t v_fix = v_cur;
 	set_vrr_mode();
+	vrr_ll = use_vrr && cfg.vrr_lowlat && supports_vrr_ll() && !is_menu();
 	if (video_is_direct())
 	{
 		v_fix.item[2] = FB_DV_RBRD;
@@ -2284,12 +2315,13 @@ static void video_set_mode(vmode_custom_t *v, double Fpix)
 #else
 		// variant 2: keep original vblank and adjust pixel clock to max refresh rate
 		int vert = v_fix.param.vact + v_fix.param.vbp + v_fix.param.vfp + v_fix.param.vs;
-		Fpix = horz * vert * vrr_max_fr;
+		int vert_min = v_fix.param.vact + v_fix.param.vbp + v_fix.param.vs + 1;
+		Fpix = horz * vert_min * vrr_clk_fr;
 		Fpix /= 1000000.f;
 		setPLL(Fpix, &v_cur);
 #endif
 
-		double freq_max = (v_cur.Fpix * 1000000.f) / (horz * vert);
+		double freq_max = (v_cur.Fpix * 1000000.f) / (horz * vert_min);
 		double freq_min = vrr_min_fr;
 		int vfp_vrr = 0;
 		if (freq_min && freq_min < freq_max)
@@ -2324,7 +2356,7 @@ static void video_set_mode(vmode_custom_t *v, double Fpix)
 	for (int i = 9; i < 21; i++)
 	{
 		printf("0x%X, ", v_cur.item[i]);
-		if (i & 1) spi_w(v_cur.item[i] | ((i == 9 && Fpix && video_vsync_adjust() == 2 && !is_menu()) ? 0x8000 : 0) | 0x4000);
+		if (i & 1) spi_w(v_cur.item[i] | ((i == 9 && !is_menu() && ((Fpix && video_vsync_adjust() == 2) || vrr_ll)) ? 0x8000 : 0) | 0x4000);
 		else
 		{
 			spi_w(v_cur.item[i]);
@@ -3555,7 +3587,11 @@ void video_mode_adjust(bool force)
 		set_vfilter(0); // update filters if flags have changed
 	}
 
-	if (refresh_info || rep_force) spd_config_update();
+	if (refresh_info || rep_force)
+	{
+		spd_config_update();
+		vrr_ll_update();
+	}
 }
 
 static void fb_write_module_params()

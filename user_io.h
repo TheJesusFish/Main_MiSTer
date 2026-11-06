@@ -78,6 +78,7 @@
 #define UIO_HDMI_INT    0x44
 #define UIO_GET_FFB     0x45  // get force feedback request from core (player in bits 15:8)
 #define UIO_ATRIG       0x46
+#define UIO_SET_VRROFF  0x47  // low latency VRR vsync offset in lines
 
 // codes as used by 8bit for file loading from OSD
 #define FIO_FILE_TX     0x53
